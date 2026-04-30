@@ -535,16 +535,39 @@ class BreakOverlayWindow(QWidget):
         p.end()
 
     def _update_timer(self, secs: int):
-        m, s = divmod(secs, 60)
-        self.timer_label.setText(f"{m:02d}:{s:02d}")
+        """Update timer display; safely handle widget destruction."""
+        try:
+            # Check if widget is still valid (not destroyed)
+            if not self.isVisible():
+                return
+            m, s = divmod(secs, 60)
+            self.timer_label.setText(f"{m:02d}:{s:02d}")
+        except RuntimeError:
+            # Widget was destroyed; signal is being processed during cleanup
+            pass
+        except Exception as e:
+            print(f"[ERROR] Timer update failed: {e}")
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape:
             self._stop_sound()
-            self.controller.skip()
+            # Disconnect the tick signal before closing to prevent stale updates
+            try:
+                self.controller.tick.disconnect(self._update_timer)
+            except Exception:
+                pass
+            self.close()
+            # Queue skip to allow overlay close to complete first (avoid re-entrant phase change)
+            QTimer.singleShot(100, self.controller.skip)
 
     def closeEvent(self, event):
+        """Clean up resources when overlay is closing."""
         self._stop_sound()
+        # Disconnect all signals to prevent orphaned connections
+        try:
+            self.controller.tick.disconnect(self._update_timer)
+        except Exception:
+            pass
         super().closeEvent(event)
 
 
@@ -614,6 +637,7 @@ class MainWindow(QWidget):
         super().__init__()
         self.controller  = controller
         self.overlay     = None
+        self._overlay_closing = False  # Guard against re-entrant overlay close operations
         self._drag_pos   = None
         self._muted      = False
         self._user_info  = {}
@@ -690,7 +714,7 @@ class MainWindow(QWidget):
         tb.addWidget(self.btn_global_mute)
 
         for symbol, handler in [("−", self._minimize_to_tray),
-                                  ("×", self._minimize_to_tray)]:
+                                  ("×", self._quit_app)]:
             btn = QPushButton(symbol)
             btn.setFixedSize(24, 24)
             btn.setStyleSheet("""
@@ -927,7 +951,7 @@ class MainWindow(QWidget):
         self._act_toggle = QAction("Pause timer", self)
         self._act_toggle.triggered.connect(self._tray_toggle_timer)
         act_quit = QAction("Quit", self)
-        act_quit.triggered.connect(QApplication.quit)
+        act_quit.triggered.connect(self._quit_app)
         act_feedback = QAction("Send feedback", self)
         act_feedback.triggered.connect(self._open_feedback)
 
@@ -941,7 +965,8 @@ class MainWindow(QWidget):
 
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(self._tray_activated)
-        self.tray.show()
+        if not self.tray.isVisible():
+            self.tray.show()
 
     def _open_feedback(self):
         email = self._user_info.get("email", "")
@@ -1087,6 +1112,27 @@ class MainWindow(QWidget):
         self.btn_login.clicked.disconnect()
         self.btn_login.clicked.connect(self._do_google_login)
 
+    def _close_overlay_safely(self):
+        """Safely close the overlay with proper state management and signal cleanup."""
+        if self.overlay is None or self._overlay_closing:
+            return
+        
+        self._overlay_closing = True
+        try:
+            # Disconnect tick signal to prevent stale updates after close
+            try:
+                self.overlay.controller.tick.disconnect(self.overlay._update_timer)
+            except Exception:
+                pass
+            # Close the overlay widget
+            _ov = self.overlay
+            self.overlay = None
+            _ov.close()
+        except Exception as e:
+            print(f"[ERROR] Overlay close failed: {e}")
+        finally:
+            self._overlay_closing = False
+
     def _toggle_global_mute(self):
         self._muted = not self._muted
         self.btn_global_mute.setText("🔇" if self._muted else "🔊")
@@ -1101,25 +1147,36 @@ class MainWindow(QWidget):
             self._ui_start()
 
     def _apply_settings(self):
-        flow_map = {0: "auto", 1: "always_short", 2: "always_long"}
-        flow = flow_map.get(self._flow_combo.currentIndex(), "auto")
-        self.controller.update_settings(
-            self._dur_spins["work"].value_secs(),
-            self._dur_spins["short"].value_secs(),
-            self._dur_spins["long"].value_secs(),
-            flow
-        )
-        self.btn_pause.hide()
-        self.btn_start.show()
-        self._act_toggle.setText("Pause timer")
-        self.status_label.setText("saved")
-        self.status_label.setStyleSheet("color: rgba(192,132,252,110); font-size: 9px;")
-        s = QSettings("ScreenBreak", "ScreenBreak")
-        s.setValue("work_secs",  self._dur_spins["work"].value_secs())
-        s.setValue("short_secs", self._dur_spins["short"].value_secs())
-        s.setValue("long_secs",  self._dur_spins["long"].value_secs())
-        s.setValue("break_flow", self._flow_combo.currentIndex())
-        s.setValue("muted",      self._muted)
+        """Apply settings with safe overlay cleanup before controller reset."""
+        # Close any live break overlay before resetting the controller,
+        # because update_settings → reset → phase_changed would otherwise
+        # try to manipulate a partially-destroyed overlay.
+        self._close_overlay_safely()
+
+        try:
+            flow_map = {0: "auto", 1: "always_short", 2: "always_long"}
+            flow = flow_map.get(self._flow_combo.currentIndex(), "auto")
+            self.controller.update_settings(
+                self._dur_spins["work"].value_secs(),
+                self._dur_spins["short"].value_secs(),
+                self._dur_spins["long"].value_secs(),
+                flow
+            )
+            self.btn_pause.hide()
+            self.btn_start.show()
+            self._act_toggle.setText("Pause timer")
+            self.status_label.setText("saved")
+            self.status_label.setStyleSheet("color: rgba(192,132,252,110); font-size: 9px;")
+            s = QSettings("ScreenBreak", "ScreenBreak")
+            s.setValue("work_secs",  self._dur_spins["work"].value_secs())
+            s.setValue("short_secs", self._dur_spins["short"].value_secs())
+            s.setValue("long_secs",  self._dur_spins["long"].value_secs())
+            s.setValue("break_flow", self._flow_combo.currentIndex())
+            s.setValue("muted",      self._muted)
+        except Exception as e:
+            print(f"[ERROR] Apply settings failed: {e}")
+            self.status_label.setText("error saving settings")
+            self.status_label.setStyleSheet("color: rgba(255,100,100,140); font-size: 9px;")
 
     def _load_settings(self):
         s       = QSettings("ScreenBreak", "ScreenBreak")
@@ -1146,32 +1203,40 @@ class MainWindow(QWidget):
 
     # ── controller callbacks ──────────────────
     def _on_phase_changed(self, phase: str):
+        """Handle phase transitions with proper overlay state management."""
+        # Skip overlay manipulation if a close operation is already in progress
+        if self._overlay_closing:
+            return
+        
         if phase == "Work":
-            if self.overlay is not None:
-                self.overlay.close()
-                self.overlay = None
+            # Close any active overlay when returning to work phase
+            self._close_overlay_safely()
             self.status_label.setText("focusing")
             self.status_label.setStyleSheet(
                 "color: rgba(192,132,252,120); font-size: 9px;")
             # Pre-pick assets for the next break
             self._picker.start()
         else:
-            if self.overlay is not None:
-                self.overlay.close()
-            gif_path, sound_path = self._picker.pop()
-            self.overlay = BreakOverlayWindow(
-                self.controller,
-                muted=self._muted,
-                gif_path=gif_path,
-                sound_path=sound_path,
-            )
-            self.overlay.showFullScreen()
-            self.tray.showMessage(
-                "break time",
-                f"{phase} — step away",
-                QSystemTrayIcon.MessageIcon.Information,
-                3000
-            )
+            # Close any existing overlay before creating new one
+            self._close_overlay_safely()
+            try:
+                gif_path, sound_path = self._picker.pop()
+                self.overlay = BreakOverlayWindow(
+                    self.controller,
+                    muted=self._muted,
+                    gif_path=gif_path,
+                    sound_path=sound_path,
+                )
+                self.overlay.showFullScreen()
+                self.tray.showMessage(
+                    "break time",
+                    f"{phase} — step away",
+                    QSystemTrayIcon.MessageIcon.Information,
+                    3000
+                )
+            except Exception as e:
+                print(f"[ERROR] Failed to create break overlay: {e}")
+                self.overlay = None
 
     def _on_session_done(self, count: int):
         pos = count % self.controller.sessions_per_cycle or \
@@ -1249,9 +1314,16 @@ class MainWindow(QWidget):
                 QTimer.singleShot(0, self._minimize_to_tray)
         super().changeEvent(event)
 
+    def _quit_app(self):
+        """Fully quit the application — used by the × title-bar button."""
+        self.tray.hide()
+        QApplication.quit()
+
     def closeEvent(self, event):
-        event.ignore()
-        self._minimize_to_tray()
+        # OS close (Alt+F4, taskbar close, etc.) → also quit fully.
+        self.tray.hide()
+        event.accept()
+        QApplication.quit()
 
 
 # ──────────────────────────────────────────────
