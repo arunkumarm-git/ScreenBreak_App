@@ -19,6 +19,8 @@ dist/
 # Byte-compiled / Optimized / DLL files
 # -----------------------------
 __pycache__/
+pro/__pycache__/
+ui/__pycache__/
 
 
 # -----------------------------
