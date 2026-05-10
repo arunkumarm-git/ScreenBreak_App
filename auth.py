@@ -5,6 +5,10 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 import google.auth.transport.requests
 from supabase import create_client
 from PyQt6.QtCore import QSettings
+from assets import USER_DATA_DIR # or wherever you store settings
+
+from dotenv import load_dotenv
+load_dotenv()
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
@@ -13,6 +17,11 @@ def get_supabase_client():
     if SUPABASE_URL and SUPABASE_KEY:
         return create_client(SUPABASE_URL, SUPABASE_KEY)
     return None
+
+def save_cached_user(user_info):
+    cache_path = os.path.join(USER_DATA_DIR, "session.json")
+    with open(cache_path, "w") as f:
+        json.dump(user_info, f)
 
 def perform_login():
     """Handles Google OAuth and Supabase upsert."""

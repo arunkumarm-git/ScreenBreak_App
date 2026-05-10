@@ -116,29 +116,32 @@ class FeedbackWindow(QWidget):
         if self._rating == 0:
             self.status_lbl.setText("please select a rating ★")
             return
+            
         self.btn_submit.setText("sending...")
         QApplication.processEvents()
+        
         try:
-            url = os.getenv("SUPABASE_URL")
-            key = os.getenv("SUPABASE_KEY")
-            if not url or not key:
-                self.status_lbl.setText("couldn't send — missing config")
-                print(f"Feedback error: SUPABASE_URL={url!r}, SUPABASE_KEY={key!r}")
+            # ---> NEW: Use your existing client instead of os.getenv <---
+            sb = get_supabase_client()
+            if not sb:
+                self.status_lbl.setText("couldn't connect to database")
                 self.btn_submit.setText("send feedback")
                 return
-            sb = create_client(url, key)
+
             sb.table("feedback").insert({
                 "email":   self.user_email or "anonymous",
                 "rating":  self._rating,
                 "message": self.msg_box.toPlainText().strip(),
             }).execute()
+            
             self.status_lbl.setText("✓ thanks for your feedback!")
             self.btn_submit.setText("sent!")
             QTimer.singleShot(2000, self.close)
+            
         except Exception as e:
             self.status_lbl.setText("couldn't send — check your connection")
             self.btn_submit.setText("send feedback")
-            print(f"Feedback error ({type(e).__name__}): {e}")  # ← was swallowing details
+            print(f"Feedback error ({type(e).__name__}): {e}")
             import traceback; traceback.print_exc()
 
     def paintEvent(self, event):

@@ -3,7 +3,8 @@ from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButt
 from PyQt6.QtCore import Qt, QTimer, QRectF
 from PyQt6.QtGui import QPainter, QColor, QPainterPath, QLinearGradient, QBrush, QPen, QDesktopServices
 from PyQt6.QtCore import QUrl
-from auth import get_supabase_client
+from auth import get_supabase_client, save_cached_user
+import requests
 
 class UpgradeDialog(QWidget):
     def __init__(self, main_window, parent=None):
@@ -53,7 +54,7 @@ class UpgradeDialog(QWidget):
         self.btn_buy = QPushButton("get pro — $9 / lifetime")
         self.btn_buy.setStyleSheet("QPushButton { background: rgba(192,132,252,0.25); color: #d8b4fe; border: 1px solid rgba(192,132,252,0.5); border-radius: 8px; padding: 12px; font-size: 12px; font-weight: bold; } QPushButton:hover { background: rgba(192,132,252,0.4); }")
         # Replace with your actual LemonSqueezy/Gumroad link
-        self.btn_buy.clicked.connect(lambda: QDesktopServices.openUrl(QUrl("https://your-store.com/checkout")))
+        self.btn_buy.clicked.connect(lambda: QDesktopServices.openUrl(QUrl("https://screenbreak.lemonsqueezy.com/checkout/buy/2d24af9e-4d6a-41b9-aa06-c37525f76955")))
         root.addWidget(self.btn_buy)
 
         # License Activation
@@ -87,18 +88,30 @@ class UpgradeDialog(QWidget):
         QApplication.processEvents()
         
         try:
-            sb = get_supabase_client()
-            row = sb.table("licenses").select("*").eq("key", key).single().execute()
+            # 1. Activate the key via LemonSqueezy API
+            ls_url = "https://api.lemonsqueezy.com/v1/licenses/activate"
+            payload = {
+                "license_key": key,
+                "instance_name": sub 
+            }
             
-            if row.data and not row.data.get("redeemed_by"):
-                # Mark license as used and update user row
-                sb.table("licenses").update({"redeemed_by": sub, "redeemed_at": "now()"}).eq("key", key).execute()
+            res = requests.post(ls_url, data=payload, headers={"Accept": "application/json"})
+            data = res.json()
+            
+            # Check if successfully activated OR if they are re-entering a key they already activated
+            if data.get("activated") or data.get("error") == "License key already activated.":
+                
+                # Update Supabase
+                sb = get_supabase_client()
                 sb.table("users").update({"is_pro": True}).eq("google_sub", sub).execute()
                 
-                # Update main window state natively
+                # Update main window UI natively
                 self.main_window._is_pro = True
                 self.main_window._user_info["is_pro"] = True
                 self.main_window._refresh_pro_badge()
+                
+                #Update the local cache so it survives app restart! <---
+                save_cached_user(self.main_window._user_info)
                 
                 self.status.setStyleSheet("color: #34d399; font-size: 11px; font-weight: bold;")
                 self.status.setText("✓ pro activated! welcome!")
@@ -106,7 +119,8 @@ class UpgradeDialog(QWidget):
             else:
                 self.btn_activate.setText("activate")
                 self.status.setStyleSheet("color: #f87171; font-size: 10px;")
-                self.status.setText("invalid or already used key")
+                self.status.setText(data.get("error", "invalid or already used key"))
+                
         except Exception as e:
             self.btn_activate.setText("activate")
             self.status.setText("couldn't verify — check connection")
